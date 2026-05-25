@@ -361,6 +361,7 @@
 
     #email-list {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 4px 14px 14px;
       display: flex;
@@ -387,6 +388,7 @@
       position: relative;
       animation: card-in 0.3s ease both;
       overflow: hidden;
+      flex-shrink: 0;
     }
 
     @keyframes card-in {
