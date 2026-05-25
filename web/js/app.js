@@ -1,134 +1,322 @@
-const Messages = {
-    list: [],
-    lastRefreshed: moment(),
-    fetch: (vnode, params = {}) => m.request({url: "fetch.php", params}).then((result) => {
-        Messages.lastRefreshed = moment();
-        Messages.list = result;
-    }),
+/* ===========================================================
+   Spool Reader · App logic
+   =========================================================== */
+
+/* ── STATE ─────────────────────────── */
+let messages     = [];
+let selected     = null;
+let syncedAt     = null;
+let filterText   = '';
+let senderFilter = '';
+
+/* ── DOM ───────────────────────────── */
+const $ = id => document.getElementById(id);
+const elList      = $('email-list');
+const elNone      = $('no-emails');
+const elSync      = $('last-sync').querySelector('span:last-child');
+const elInfoSync  = $('info-sync');
+const elEmpty     = $('email-empty');
+const elViewer    = $('email-viewer');
+const elSubject   = $('meta-subject');
+const elActorFrom = $('meta-actor-from');
+const elActorTo   = $('meta-actor-to');
+const elTime      = $('meta-time');
+const elFrom      = $('m-from');
+const elTo        = $('m-to');
+const elReplyTo   = $('m-replyto');
+const elFrame     = $('email-frame');
+const elFill      = $('progress-fill');
+const elIco       = $('ico-refresh');
+const elSenders   = $('senders-list');
+const elCountAll  = $('nav-count-all');
+const elPrint     = $('btn-print');
+
+/* ── HELPERS ───────────────────────── */
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// Hack to inject HTML into the body of an iFrame
-const proxy = vnode => m.render(vnode.dom.contentDocument.documentElement, vnode.children);
-const IframeNode = {
-    oncreate: proxy,
-    onupdate: proxy,
-    view: vnode => m('iframe', vnode.attrs)
+function addrText(a) {
+  if (!a) return '';
+  if (typeof a === 'string') return a;
+  const k = Object.keys(a)[0];
+  const v = Object.values(a)[0];
+  return v || k;
 }
 
-const EmailRow = {
-
-    formatEmail: (email, abbr = false) => {
-        if (typeof email === 'string') {
-            return email;
-        }
-
-        const address = Object.keys(email)[0];
-        const name = Object.values(email)[0];
-        if (abbr) {
-            return name ? m('abbr', {rel: 'tooltip', title: address}, name) : m('span', address);
-        } else {
-            return name ? m('span.email', [name, m('small', address)]) : m('span', address);
-        }
-    },
-
-    renderTo: function (headers) {
-        if (headers['X-Swift-To']) {
-            let xSwiftTo = headers['X-Swift-To'];
-            const address = Object.keys(xSwiftTo)[0];
-            const name = Object.values(xSwiftTo)[0];
-            return m('span.xswift', [name, m('small', address), this.formatEmail(headers['To'], true)]);
-        }
-
-        return this.formatEmail(headers['To']);
-    },
-
-    modal: function(message) {
-        const headers = message.headers;
-        const messageId = headers['Message-ID'][0].replace(/@.*$/,'');
-
-        const modalHeader = m("h6.modal-title.float-left", headers['Subject']);
-        const button = m("button", {type: "button", class: "close", "data-dismiss": "modal"}, "×");
-        const modalInfo = m('.row.py-1', [
-            m('.col-1.label', 'From'), m('.col-5.value', this.formatEmail(headers['From'])),
-            m('.col-1.label', 'To'), m('.col-5.value', this.renderTo(headers))
-        ]);
-
-        return m(".modal", {id: `modal-${messageId}`}, [
-            m(".modal-dialog.modal-dialog-scrollable", [
-                m(".modal-content", [
-                    m(".modal-header", [
-                        m('.container-fluid', [
-                            m('.row', m('.col.px-0', [modalHeader, button])),
-                            modalInfo
-                        ])
-                    ]),
-                    m(".modal-body", m(IframeNode, {onload: {}, id: `iframe-${messageId}`}, m.trust(message.body)))
-                ])
-            ])
-        ]);
-    },
-
-    btnShowEmail: (message) => {
-        const messageId = message.headers['Message-ID'][0].replace(/@.*$/,'');
-        const props = {type: "button", "data-toggle": "modal", "data-target": `#modal-${messageId}`, class: "btn btn-sm btn-primary"};
-        return m("button", props, "Show Email");
-    },
-
-    formatDate: (unixtime) => {
-        const date = moment(unixtime * 1000);
-        let dateStr = date.format('MMM D HH:MM');
-        if (date.format('l') === moment().format('l')) {
-            dateStr = 'Today ' + date.format('HH:MM');
-        }
-        return m("span.date", [dateStr, m('small.relative-date', date.fromNow())]);
-    },
-
-    view: function (vnode) {
-        // console.log('Rendering EmailRow', vnode.attrs);
-        const data = vnode.attrs;
-        const headers = data.message.headers;
-        const replyTo = headers['Reply-To'] ? this.formatEmail(headers['Reply-To']) : m('span', 'N/A');
-
-        return [m("tr", [
-            m("td", data.idx),
-            m("td", this.formatDate(headers['Date'])),
-            m("td", this.formatEmail(headers['From'])),
-            m("td", replyTo),
-            m("td", this.renderTo(headers)),
-            m("td", headers['Subject']),
-            m("td", this.btnShowEmail(data.message))
-        ]), this.modal(data.message)];
-    }
+function addrHtml(a) {
+  if (!a) return '<span style="color:var(--text-3)">—</span>';
+  if (typeof a === 'string') {
+    return `<span class="addr" style="margin-left:0">${esc(a)}</span>`;
+  }
+  const addr = Object.keys(a)[0];
+  const name = Object.values(a)[0];
+  if (name) return `${esc(name)}<span class="addr">${esc(addr)}</span>`;
+  return `<span class="addr" style="margin-left:0">${esc(addr)}</span>`;
 }
 
-const EmailList = {
-    oninit: Messages.fetch,
-    data: {idx: 0}, // Initial state
+const palette = ['#ff5a73','#ff9d4a','#4ed3e8','#ff7eb6','#4cd084','#a78bfa','#3b5cff','#ffc24a'];
 
-    oncreate: function(vnode) {
-        setInterval(m.redraw, 30000);
-    },
-
-    view: function (vnode) {
-        vnode.state.data.idx = 0; // Reset count to zero when the list is rendered
-        const count = Messages.list.length;
-        const title = document.title.replace(/^\(\d+\) /, '');
-        document.title = `(${count}) ${title}`;
-        $('.total-messages').html(count);
-        $('.last-refreshed').html(Messages.lastRefreshed.fromNow());
-
-        const thead = m("thead", [
-            m("tr", [
-                m("th", "#"), m("th.date", "Date"), m("th.email", "From"), m("th.email", "Reply To"),
-                m("th.email", "To"), m("th", "Subject"), m("th.actions", "Actions")
-            ])
-        ]);
-
-        const tbody = m("tbody", Messages.list.map((message) => m(EmailRow, {message, idx: ++vnode.state.data.idx})));
-        return [thead, tbody];
-    }
+function hashIdx(str, n) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h) % n;
 }
 
-m.mount(document.querySelector('table'), EmailList);
-$('.action-fetch').on('click', Messages.fetch);
-$('.action-clear').on('click', Messages.fetch.bind(this, null, {clear: 1}));
+function senderColor(name) {
+  return palette[hashIdx(name || '?', palette.length)];
+}
+
+function initials(name) {
+  if (!name) return '?';
+  const parts = name.trim().split(/[\s\.@]+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+function toDate(ts) {
+  if (ts == null) return null;
+  if (typeof ts === 'number')      return new Date(ts * 1000);
+  if (typeof ts === 'string')      return new Date(ts);
+  if (typeof ts === 'object' && ts.date) {
+    return new Date(ts.date.replace(' ', 'T') + (ts.timezone === 'UTC' ? 'Z' : ''));
+  }
+  return null;
+}
+
+function fmtShort(ts) {
+  const d = toDate(ts);
+  if (!d || isNaN(d.getTime())) return '—';
+  const now = new Date();
+  if (d.toDateString() === now.toDateString())
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function fmtFull(ts) {
+  const d = toDate(ts);
+  if (!d || isNaN(d.getTime())) return 'Unknown';
+  const now = new Date();
+  const day = d.toDateString() === now.toDateString()
+    ? 'Today'
+    : d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  return `${day} · ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function timeAgo(ms) {
+  if (!ms) return '—';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 10)   return 'just now';
+  if (s < 60)   return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
+/* ── PROGRESS ──────────────────────── */
+function startLoad() {
+  elFill.className = 'loading';
+  elIco.classList.add('spin');
+}
+function endLoad() {
+  elFill.className = 'done';
+  elIco.classList.remove('spin');
+  setTimeout(() => { elFill.className = ''; }, 500);
+}
+
+/* ── FETCH ─────────────────────────── */
+async function fetchMessages(clear = false) {
+  startLoad();
+  try {
+    const r = await fetch('fetch.php' + (clear ? '?clear=1' : ''));
+    messages = await r.json();
+    syncedAt = Date.now();
+    if (clear) { selected = null; showEmpty(); }
+    renderSenders();
+    renderList();
+    updateSync();
+  } catch (e) {
+    console.error('Fetch failed', e);
+  } finally {
+    endLoad();
+  }
+}
+
+/* ── SENDERS SIDEBAR ───────────────── */
+function renderSenders() {
+  const counts = new Map();
+  for (const m of messages) {
+    const n = addrText(m.headers['From']) || 'Unknown';
+    counts.set(n, (counts.get(n) || 0) + 1);
+  }
+  elCountAll.textContent = messages.length;
+
+  elSenders.querySelectorAll('.nav-item[data-sender]:not([data-sender=""])').forEach(n => n.remove());
+
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [name, count] of sorted) {
+    const el = document.createElement('div');
+    el.className = 'nav-item' + (senderFilter === name ? ' active' : '');
+    el.dataset.sender = name;
+    el.innerHTML = `
+      <span class="dot" style="background:${senderColor(name)}"></span>
+      <span class="name">${esc(name)}</span>
+      <span class="count">${count}</span>`;
+    el.addEventListener('click', () => {
+      senderFilter = senderFilter === name ? '' : name;
+      renderSenders();
+      renderList();
+    });
+    elSenders.appendChild(el);
+  }
+
+  elSenders.querySelectorAll('.nav-item[data-sender=""]').forEach(el => {
+    el.classList.toggle('active', senderFilter === '');
+    el.onclick = () => {
+      if (senderFilter === '') return;
+      senderFilter = '';
+      renderSenders();
+      renderList();
+    };
+  });
+}
+
+/* ── LIST ──────────────────────────── */
+function visible() {
+  const q = filterText.toLowerCase();
+  return messages.filter(m => {
+    const h = m.headers;
+    if (senderFilter && addrText(h['From']) !== senderFilter) return false;
+    if (!q) return true;
+    return [h['Subject'], addrText(h['From']), addrText(h['To'])]
+      .some(v => (v || '').toLowerCase().includes(q));
+  });
+}
+
+function renderList() {
+  document.title = `(${messages.length}) Spool Reader`;
+  elList.querySelectorAll('.e-item').forEach(n => n.remove());
+
+  const items = visible();
+  if (items.length === 0) {
+    elNone.style.display = 'block';
+    elNone.textContent = messages.length === 0
+      ? 'The spool is empty.'
+      : (filterText ? `No matches for "${filterText}".` : 'No messages from this sender.');
+    return;
+  }
+  elNone.style.display = 'none';
+
+  items.forEach((msg, i) => {
+    const h      = msg.headers;
+    const idx    = messages.indexOf(msg);
+    const fromN  = addrText(h['From']) || '—';
+    const toAddr = h['X-Swift-To'] || h['To'];
+    const toN    = addrText(toAddr) || '—';
+    const subj   = h['Subject'] || '(No subject)';
+    const ts     = fmtShort(h['Date']);
+    const color  = senderColor(fromN);
+    const inits  = initials(fromN);
+
+    const el = document.createElement('div');
+    el.className = 'e-item' + (idx === selected ? ' sel' : '');
+    el.style.setProperty('--strip', color);
+    el.style.animationDelay = `${i * 28}ms`;
+    el.dataset.idx = idx;
+    el.innerHTML = `
+      <div class="e-row1">
+        <div class="avatar">${esc(inits)}</div>
+        <div class="e-meta">
+          <div class="e-from">${esc(fromN)}</div>
+          <div class="e-ts">${esc(ts)}</div>
+        </div>
+      </div>
+      <div class="e-subject">${esc(subj)}</div>
+      <div class="e-to"><span class="arrow">→</span>${esc(toN)}</div>`;
+    el.addEventListener('click', () => selectEmail(idx));
+    elList.appendChild(el);
+  });
+}
+
+/* ── VIEWER ────────────────────────── */
+function showEmpty() {
+  elEmpty.style.display = 'flex';
+  elViewer.classList.remove('open');
+}
+
+function selectEmail(idx) {
+  selected = idx;
+  elList.querySelectorAll('.e-item.sel').forEach(n => n.classList.remove('sel'));
+  const next = elList.querySelector(`.e-item[data-idx="${idx}"]`);
+  if (next) next.classList.add('sel');
+  openEmail(idx);
+}
+
+function openEmail(idx) {
+  const msg = messages[idx];
+  if (!msg) return showEmpty();
+  const h = msg.headers;
+
+  elEmpty.style.display = 'none';
+  elViewer.classList.remove('open');
+  void elViewer.offsetWidth;
+  elViewer.classList.add('open');
+
+  elSubject.textContent   = h['Subject'] || '(No subject)';
+  elActorFrom.textContent = addrText(h['From']) || '—';
+  const toAddr            = h['X-Swift-To'] || h['To'];
+  elActorTo.textContent   = addrText(toAddr) || '—';
+  elTime.textContent      = fmtFull(h['Date']);
+
+  elFrom.innerHTML    = addrHtml(h['From']);
+  elReplyTo.innerHTML = h['Reply-To']
+    ? addrHtml(h['Reply-To'])
+    : '<span style="color:var(--text-3)">—</span>';
+
+  if (h['X-Swift-To']) {
+    const realTo = esc(addrText(h['To']));
+    elTo.innerHTML = addrHtml(h['X-Swift-To'])
+      + `<span class="via-tag">via ${realTo}</span>`;
+  } else {
+    elTo.innerHTML = addrHtml(h['To']);
+  }
+
+  const doc = elFrame.contentDocument || elFrame.contentWindow.document;
+  doc.open();
+  doc.write(msg.body || '<p style="padding:24px;color:#666;font-family:sans-serif">No content</p>');
+  doc.close();
+}
+
+/* ── PRINT ─────────────────────────── */
+function printEmail() {
+  const win = elFrame.contentWindow;
+  if (!win) return;
+  win.focus();
+  win.print();
+}
+
+/* ── SYNC ──────────────────────────── */
+function updateSync() {
+  elSync.textContent = 'synced ' + timeAgo(syncedAt);
+  elInfoSync.textContent = timeAgo(syncedAt);
+}
+
+/* ── EVENTS ────────────────────────── */
+$('btn-refresh').addEventListener('click', () => fetchMessages());
+$('btn-clear').addEventListener('click', () => {
+  if (confirm('Delete all messages from the spool?')) fetchMessages(true);
+});
+$('search').addEventListener('input', e => {
+  filterText = e.target.value;
+  renderList();
+});
+elPrint.addEventListener('click', printEmail);
+
+/* ── INIT ──────────────────────────── */
+fetchMessages();
+setInterval(fetchMessages, 30_000);
+setInterval(updateSync,    15_000);
