@@ -80,7 +80,11 @@ class SpoolReader
         $message = array('headers' => array(), 'body' => '');
 
         foreach ($swiftMessage->getHeaders()->getAll() as $header) {
-            $message['headers'][$header->getFieldName()] = $header->getFieldBodyModel();
+            $value = $header->getFieldBodyModel();
+            if ($value instanceof DateTimeInterface) {
+                $value = $value->getTimestamp();
+            }
+            $message['headers'][$header->getFieldName()] = $value;
         }
 
         $message['body'] = $swiftMessage->getBody();
